@@ -15,5 +15,13 @@ class Settings(BaseSettings):
     # LLM_MODEL is then the plain gateway slug, without a "<provider>:" prefix.
     LLM_BASE_URL: str | None = None
 
+    IMAP_HOST: str = "localhost"
+    IMAP_PORT: int = 3143
+    IMAP_SSL: bool = False
+    # Unset: a random dev address is generated on every start.
+    EMAIL_ADDRESS: str | None = None
+    # Unset: the address doubles as the password, which GreenMail accepts.
+    EMAIL_PASSWORD: SecretStr | None = None
+
 
 settings = Settings()  # pyright: ignore[reportCallIssue]
