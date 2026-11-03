@@ -17,22 +17,22 @@ def _instructions(ctx: RunContext[Mailbox]) -> str:
     )
 
 
-def _agent(model: Model) -> Agent[Mailbox]:
+def build_agent(llm: str, token: str, base_url: str | None = None) -> Agent[Mailbox]:
+    model: Model
+    if base_url:
+        provider = OpenAIProvider(base_url=base_url, api_key=token)
+        model = OpenAIChatModel(llm, provider=provider)
+    else:
+        model = infer_model(
+            llm,
+            provider_factory=lambda provider: infer_provider_class(provider)(
+                api_key=token  # pyright: ignore[reportCallIssue]
+            ),
+        )
+
     return Agent(
         model,
         deps_type=Mailbox,
         toolsets=[mailbox_toolset],
         instructions=_instructions,
     )
-
-
-def build_agent(llm: str, token: str, base_url: str | None = None) -> Agent[Mailbox]:
-    if base_url:
-        provider = OpenAIProvider(base_url=base_url, api_key=token)
-        return _agent(OpenAIChatModel(llm, provider=provider))
-
-    model = infer_model(
-        llm,
-        provider_factory=lambda provider: infer_provider_class(provider)(api_key=token),  # pyright: ignore[reportCallIssue]
-    )
-    return _agent(model)
