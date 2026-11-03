@@ -2,7 +2,7 @@ import argparse
 import mimetypes
 import smtplib
 from email.message import EmailMessage
-from email.utils import make_msgid
+from email.utils import formatdate, make_msgid
 from pathlib import Path
 
 SMTP_HOST = "127.0.0.1"
@@ -15,6 +15,7 @@ def build_message(args: argparse.Namespace) -> EmailMessage:
     message["From"] = args.sender
     message["To"] = args.to
     message["Subject"] = args.subject
+    message["Date"] = formatdate(localtime=True)
     message["Message-ID"] = make_msgid(domain=DEV_DOMAIN)
     if args.reply_to:
         message["In-Reply-To"] = args.reply_to

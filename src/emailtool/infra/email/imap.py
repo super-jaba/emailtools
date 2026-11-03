@@ -1,12 +1,9 @@
 import asyncio
-from collections import defaultdict
-from contextlib import contextmanager
-from itertools import batched
-from typing import TYPE_CHECKING, Any, cast
+import imaplib
+from typing import TYPE_CHECKING
 
-from imapclient import IMAPClient
-from imapclient.exceptions import IMAPClientError
-from imapclient.imapclient import SENT
+from imap_tools import AND, OR, H, MailBox, MailBoxUnencrypted
+from imap_tools.errors import ImapToolsError
 
 from emailtool.infra.email.base import (
     AttachmentNotFound,
@@ -16,213 +13,141 @@ from emailtool.infra.email.base import (
 )
 from emailtool.infra.email.models import (
     AttachmentContent,
+    AttachmentInfo,
     EmailMessage,
     EmailThread,
     MessageFilter,
-)
-from emailtool.infra.email.parsing import (
-    AttachmentRef,
-    MessageRef,
-    build_summary,
-    parse_body,
-    parse_thread_headers,
-    read_attachment,
+    MessageSummary,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
-    from emailtool.infra.email.models import MessageSummary
+    from imap_tools import BaseMailBox, EmailAddress, MailMessage
 
-INBOX = "INBOX"
-MAX_THREAD_MESSAGES = 200
-TIMEOUT_SECONDS = 30
-FETCH_BATCH_SIZE = 100
-
-SUMMARY_FIELDS = ["ENVELOPE", "FLAGS", "INTERNALDATE", "BODYSTRUCTURE"]
-THREAD_HEADERS = "HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)"
-THREAD_HEADERS_FETCH = f"BODY.PEEK[{THREAD_HEADERS}]"
-THREAD_HEADERS_KEY = f"BODY[{THREAD_HEADERS}]".encode()
-THREAD_SEARCH_HEADERS = ("Message-ID", "References", "In-Reply-To")
+CHARSET = "UTF-8"
 
 
-def _search(client: IMAPClient, criteria: list[Any]) -> list[int]:
-    return client.search(criteria, charset="UTF-8")  # pyright: ignore[reportArgumentType]
+def _header(msg: MailMessage, name: str) -> str:
+    return (msg.headers.get(name.lower()) or ("",))[0].strip()
 
 
-def _raw(item: dict[bytes, Any], key: bytes) -> bytes:
-    return cast("bytes", item[key])
+def _has_address(addresses: tuple[EmailAddress, ...], needle: str) -> bool:
+    needle = needle.lower()
+    return any(needle in f"{a.name} {a.email}".lower() for a in addresses)
 
 
-def _build_criteria(filters: MessageFilter) -> list[Any]:
-    criteria: list[Any] = ["UNDELETED"]
-    if filters.subject:
-        criteria += ["SUBJECT", filters.subject]
-    if filters.body:
-        criteria += ["BODY", filters.body]
-    if filters.since:
-        criteria += ["SINCE", filters.since]
-    if filters.before:
-        criteria += ["BEFORE", filters.before]
-    if filters.unread_only:
-        criteria.append("UNSEEN")
-    return criteria
-
-
-def _matches(summary: MessageSummary, filters: MessageFilter) -> bool:
-    # FROM/TO/CC search semantics differ between servers (GreenMail only matches
-    # whole addresses), so substring matching on addresses happens client-side.
-    if filters.sender and filters.sender.lower() not in (summary.sender or "").lower():
+def _matches(msg: MailMessage, filters: MessageFilter) -> bool:
+    # Done client-side: FROM/TO/CC search semantics differ between servers
+    # (GreenMail only matches whole addresses).
+    if filters.sender and not _has_address(
+        (msg.from_values,) if msg.from_values else (), filters.sender
+    ):
         return False
-    if filters.recipient:
-        needle = filters.recipient.lower()
-        if not any(needle in address.lower() for address in summary.to + summary.cc):
-            return False
-    return summary.has_attachments or not filters.has_attachments
+    if filters.recipient and not _has_address(
+        msg.to_values + msg.cc_values, filters.recipient
+    ):
+        return False
+    return bool(msg.attachments) or not filters.has_attachments
 
 
-def _select_ref(client: IMAPClient, ref: MessageRef) -> None:
-    try:
-        info = client.select_folder(ref.folder)
-    except IMAPClientError as e:
-        raise MessageNotFound(f"Folder not found: {ref.folder}") from e
-    if info[b"UIDVALIDITY"] != ref.uid_validity:
-        raise MessageNotFound(f"Stale message reference in {ref.folder}")
+def _to_summary(msg: MailMessage) -> MessageSummary:
+    return MessageSummary(
+        message_id=_header(msg, "Message-ID") or None,
+        sender=msg.from_values.full if msg.from_values else None,
+        to=[a.full for a in msg.to_values],
+        cc=[a.full for a in msg.cc_values],
+        subject=msg.subject,
+        date=msg.date,
+        is_read="\\Seen" in msg.flags,
+        has_attachments=bool(msg.attachments),
+    )
 
 
-def _decode_message_ref(message_id: str) -> MessageRef:
-    try:
-        return MessageRef.decode(message_id)
-    except (ValueError, TypeError) as e:
-        raise MessageNotFound(f"Invalid message id: {message_id}") from e
+def _to_message(msg: MailMessage) -> EmailMessage:
+    return EmailMessage(
+        **_to_summary(msg).model_dump(),
+        body_text=msg.text or None,
+        body_html=msg.html or None,
+        attachments=[
+            AttachmentInfo(
+                filename=a.filename, content_type=a.content_type, size=a.size
+            )
+            for a in msg.attachments
+        ],
+    )
 
 
-def _decode_attachment_ref(attachment_id: str) -> AttachmentRef:
-    try:
-        return AttachmentRef.decode(attachment_id)
-    except (ValueError, TypeError) as e:
-        raise AttachmentNotFound(f"Invalid attachment id: {attachment_id}") from e
+def _folders(mailbox: BaseMailBox) -> list[str]:
+    sent = [
+        f.name
+        for f in mailbox.folder.list()
+        if "\\Sent" in f.flags or f.name.lower() == "sent"
+    ]
+    return ["INBOX", *sent]
 
 
-def _list_messages(client: IMAPClient, filters: MessageFilter) -> list[MessageSummary]:
-    info = client.select_folder(filters.folder)
-    uid_validity = info[b"UIDVALIDITY"]
-    uids = sorted(_search(client, _build_criteria(filters)), reverse=True)
+def _find(mailbox: BaseMailBox, message_id: str) -> MailMessage:
+    for folder in _folders(mailbox):
+        mailbox.folder.set(folder)
+        criteria = AND(header=H("Message-ID", message_id))
+        for msg in mailbox.fetch(criteria, CHARSET, limit=1):
+            return msg
+    raise MessageNotFound(f"Message not found: {message_id}")
+
+
+def _list_messages(
+    mailbox: BaseMailBox, filters: MessageFilter
+) -> list[MessageSummary]:
+    mailbox.folder.set(filters.folder)
+    conditions = {
+        "subject": filters.subject,
+        "body": filters.body,
+        "date_gte": filters.since,
+        "date_lt": filters.before,
+        "seen": False if filters.unread_only else None,
+    }
+    conditions = {k: v for k, v in conditions.items() if v is not None}
+    criteria = AND(**conditions) if conditions else "ALL"
 
     summaries: list[MessageSummary] = []
-    for batch in batched(uids, FETCH_BATCH_SIZE):
-        items = client.fetch(list(batch), SUMMARY_FIELDS)
-        for uid in batch:
-            if uid not in items:
-                continue
-            summary = build_summary(
-                MessageRef(filters.folder, uid_validity, uid), items[uid]
-            )
-            if _matches(summary, filters):
-                summaries.append(summary)
-                if len(summaries) == filters.limit:
-                    return summaries
+    for msg in mailbox.fetch(criteria, CHARSET, reverse=True, mark_seen=False):
+        if _matches(msg, filters):
+            summaries.append(_to_summary(msg))
+            if len(summaries) == filters.limit:
+                break
     return summaries
 
 
-def _thread_folders(client: IMAPClient, start: MessageRef) -> list[str]:
-    folders = [start.folder, INBOX]
-    sent = client.find_special_folder(SENT)
-    if sent:
-        folders.append(sent)
-    return list(dict.fromkeys(folders))
+def _get_thread(mailbox: BaseMailBox, message_id: str) -> EmailThread:
+    # Replies list their ancestors in References, root first.
+    start = _find(mailbox, message_id)
+    references = _header(start, "References").split()
+    root = references[0] if references else message_id
+
+    criteria = OR(header=[H("Message-ID", root), H("References", root)])
+    messages: dict[str, EmailMessage] = {}
+    for folder in _folders(mailbox):
+        mailbox.folder.set(folder)
+        for msg in mailbox.fetch(criteria, CHARSET):
+            message = _to_message(msg)
+            messages.setdefault(message.message_id or "", message)
+
+    return EmailThread(messages=sorted(messages.values(), key=lambda m: m.date))
 
 
-def _find_related(
-    client: IMAPClient, target: str
-) -> Iterator[tuple[int, str, set[str]]]:
-    uids: set[int] = set()
-    for header in THREAD_SEARCH_HEADERS:
-        uids.update(_search(client, ["HEADER", header, target]))
-    if not uids:
-        return
-
-    for uid, item in client.fetch(sorted(uids), [THREAD_HEADERS_FETCH]).items():
-        own, related = parse_thread_headers(_raw(item, THREAD_HEADERS_KEY))
-        # HEADER search is a substring match, so re-check for an exact hit.
-        if own is not None and (own == target or target in related):
-            yield uid, own, related
-
-
-def _collect_thread(client: IMAPClient, start: MessageRef) -> list[tuple[str, int]]:
-    _select_ref(client, start)
-    items = client.fetch([start.uid], [THREAD_HEADERS_FETCH])
-    if start.uid not in items:
-        raise MessageNotFound(f"Message not found: {start.uid}")
-
-    own, related = parse_thread_headers(_raw(items[start.uid], THREAD_HEADERS_KEY))
-    if own is None:
-        return [(start.folder, start.uid)]
-
-    # Keyed by Message-ID, so a copy in a second folder doesn't count twice.
-    members = {own: (start.folder, start.uid)}
-    folders = _thread_folders(client, start)
-    visited: set[str] = set()
-    frontier = {own} | related
-
-    while frontier and len(members) < MAX_THREAD_MESSAGES:
-        visited |= frontier
-        discovered: set[str] = set()
-        for folder in folders:
-            client.select_folder(folder)
-            for target in frontier:
-                for uid, message_id, references in _find_related(client, target):
-                    members.setdefault(message_id, (folder, uid))
-                    discovered |= {message_id} | references
-        frontier = discovered - visited
-
-    return list(members.values())[:MAX_THREAD_MESSAGES]
-
-
-def _get_thread(client: IMAPClient, message_id: str) -> EmailThread:
-    members = _collect_thread(client, _decode_message_ref(message_id))
-
-    uids_by_folder: defaultdict[str, list[int]] = defaultdict(list)
-    for folder, uid in members:
-        uids_by_folder[folder].append(uid)
-
-    messages: list[EmailMessage] = []
-    for folder, uids in uids_by_folder.items():
-        uid_validity = client.select_folder(folder)[b"UIDVALIDITY"]
-        for uid, item in client.fetch(
-            sorted(uids), [*SUMMARY_FIELDS, "BODY[]"]
-        ).items():
-            ref = MessageRef(folder, uid_validity, uid)
-            body_text, body_html, attachments = parse_body(_raw(item, b"BODY[]"), ref)
-            messages.append(
-                EmailMessage(
-                    **build_summary(ref, item).model_dump(),
-                    body_text=body_text,
-                    body_html=body_html,
-                    attachments=attachments,
-                )
+def _get_attachment(
+    mailbox: BaseMailBox, message_id: str, filename: str
+) -> AttachmentContent:
+    for a in _find(mailbox, message_id).attachments:
+        if a.filename == filename:
+            return AttachmentContent(
+                filename=a.filename,
+                content_type=a.content_type,
+                size=a.size,
+                data=a.payload,
             )
-
-    messages.sort(key=lambda message: message.date)
-    return EmailThread(messages=messages)
-
-
-def _get_attachment(client: IMAPClient, attachment_id: str) -> AttachmentContent:
-    ref = _decode_attachment_ref(attachment_id)
-    _select_ref(client, ref.message)
-
-    # The whole message is fetched because part fetches can't be relied on:
-    # GreenMail fails BODY[1.MIME] on single-part messages and answers
-    # out-of-range sections with the message body.
-    items = client.fetch([ref.message.uid], ["BODY[]"])
-    if ref.message.uid not in items:
-        raise MessageNotFound(f"Message not found: {ref.message.uid}")
-
-    found = read_attachment(_raw(items[ref.message.uid], b"BODY[]"), ref)
-    if found is None:
-        raise AttachmentNotFound(f"Attachment not found: {ref.index}")
-    info, data = found
-    return AttachmentContent(**info.model_dump(), data=data)
+    raise AttachmentNotFound(f"Attachment not found: {filename}")
 
 
 class ImapMailbox(Mailbox):
@@ -252,29 +177,20 @@ class ImapMailbox(Mailbox):
     async def get_thread(self, message_id: str) -> EmailThread:
         return await self._run(_get_thread, message_id)
 
-    async def get_attachment(self, attachment_id: str) -> AttachmentContent:
-        return await self._run(_get_attachment, attachment_id)
+    async def get_attachment(self, message_id: str, filename: str) -> AttachmentContent:
+        return await self._run(_get_attachment, message_id, filename)
 
-    @contextmanager
-    def _connect(self) -> Iterator[IMAPClient]:
-        client = IMAPClient(
-            self._host, port=self._port, ssl=self._ssl, timeout=TIMEOUT_SECONDS
-        )
-        client.normalise_times = False  # Keep the timezone on parsed dates
-        try:
-            client.login(self._address, self._password)
-            yield client
-        finally:
-            client.shutdown()
-
-    async def _run[T, A](
-        self, operation: Callable[[IMAPClient, A], T], argument: A
+    async def _run[T, *Args](
+        self, operation: Callable[[BaseMailBox, *Args], T], *args: *Args
     ) -> T:
         def call() -> T:
+            mailbox_class = MailBox if self._ssl else MailBoxUnencrypted
             try:
-                with self._connect() as client:
-                    return operation(client, argument)
-            except (IMAPClientError, OSError) as e:
+                with mailbox_class(self._host, self._port).login(
+                    self._address, self._password, initial_folder=None
+                ) as mailbox:
+                    return operation(mailbox, *args)
+            except (ImapToolsError, imaplib.IMAP4.error, OSError) as e:
                 raise MailboxError(f"IMAP request failed: {e}") from e
 
         return await asyncio.to_thread(call)

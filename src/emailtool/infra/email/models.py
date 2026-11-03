@@ -17,8 +17,7 @@ class MessageFilter(BaseModel):
 
 
 class AttachmentInfo(BaseModel):
-    id: str
-    filename: str | None
+    filename: str
     content_type: str
     size: int
 
@@ -28,8 +27,7 @@ class AttachmentContent(AttachmentInfo):
 
 
 class MessageSummary(BaseModel):
-    id: str
-    message_id_header: str | None
+    message_id: str | None  # The Message-ID header, used to open threads
     sender: str | None
     to: list[str]
     cc: list[str]

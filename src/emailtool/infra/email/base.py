@@ -25,15 +25,19 @@ class AttachmentNotFound(MailboxError):
 class Mailbox(ABC):
     @property
     @abstractmethod
-    def address(self) -> str: ...
+    def address(self) -> str:
+        raise NotImplementedError
 
     @abstractmethod
     async def list_messages(
         self, filters: MessageFilter | None = None
-    ) -> list[MessageSummary]: ...
+    ) -> list[MessageSummary]:
+        raise NotImplementedError
 
     @abstractmethod
-    async def get_thread(self, message_id: str) -> EmailThread: ...
+    async def get_thread(self, message_id: str) -> EmailThread:
+        raise NotImplementedError
 
     @abstractmethod
-    async def get_attachment(self, attachment_id: str) -> AttachmentContent: ...
+    async def get_attachment(self, message_id: str, filename: str) -> AttachmentContent:
+        raise NotImplementedError

@@ -4,7 +4,6 @@ from emailtool.infra.email.base import (
     MailboxError,
     MessageNotFound,
 )
-from emailtool.infra.email.factory import build_mailbox, generate_dev_address
 from emailtool.infra.email.imap import ImapMailbox
 from emailtool.infra.email.models import (
     AttachmentContent,
@@ -27,6 +26,4 @@ __all__ = [
     "MessageFilter",
     "MessageNotFound",
     "MessageSummary",
-    "build_mailbox",
-    "generate_dev_address",
 ]

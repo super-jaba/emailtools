@@ -5,7 +5,6 @@ from prompt_toolkit import PromptSession
 
 from emailtool.agent import build_agent
 from emailtool.config import settings
-from emailtool.infra.email import build_mailbox
 
 if TYPE_CHECKING:
     from pydantic_ai import Agent
@@ -40,8 +39,6 @@ def main() -> None:
         settings.LLM_TOKEN.get_secret_value(),
         settings.LLM_BASE_URL,
     )
-    mailbox = build_mailbox(settings)
-    print(f"Mailbox: {mailbox.address}")
     asyncio.run(conversation(agent))
 
 

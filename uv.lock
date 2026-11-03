@@ -425,7 +425,7 @@ name = "emailtool"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "imapclient" },
+    { name = "imap-tools" },
     { name = "prompt-toolkit" },
     { name = "pydantic-ai" },
     { name = "pydantic-settings" },
@@ -440,7 +440,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "imapclient", specifier = ">=4.1.0" },
+    { name = "imap-tools", specifier = ">=1.16.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.53" },
     { name = "pydantic-ai", specifier = ">=2.64.0" },
     { name = "pydantic-settings", specifier = ">=2.16.2" },
@@ -659,12 +659,12 @@ wheels = [
 ]
 
 [[package]]
-name = "imapclient"
-version = "4.1.0"
+name = "imap-tools"
+version = "1.16.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/8d/f7/4e2d2e93313d7d7542a8378200ea931ff4e29b730d9eb5a9d8debafcbc68/imapclient-4.1.0.tar.gz", hash = "sha256:b7cefa7c9bf3ec029c007dfade191480b82eb3816fc20ab23ef48e7aec841a7f", size = 71344, upload-time = "2026-09-18T11:21:57.568Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/ff/013a8cc97cc3d7a74a5cc0d05c5eb637d47a5114efe10312ba7b72b11609/imap_tools-1.16.0.tar.gz", hash = "sha256:70cc760915965f9efd3ce2b43cbdafeca40849aedbea3623019536dc1def95b6", size = 49867, upload-time = "2026-10-14T10:17:57.817Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/52/49/12fe5860e37f2e915ecbcc6c743bc71c84c6d0f4c9002f3c5a66f79b172d/imapclient-4.1.0-py3-none-any.whl", hash = "sha256:5fd62ab2a099494ed2a5a21e7bda03c1e99e3d55bdedb4e9c12c8176873a8fe4", size = 56039, upload-time = "2026-09-18T11:21:56.499Z" },
+    { url = "https://files.pythonhosted.org/packages/92/d8/b9797cfdbfb885c0ebce581234e5e09ec1805f5d8b42247f8d9cde23ca92/imap_tools-1.16.0-py3-none-any.whl", hash = "sha256:8ae0860d626d44ad21c3b917309d135eb4d112159d4ce78b90a03b9bb9ba0de9", size = 36716, upload-time = "2026-10-14T10:17:54.494Z" },
 ]
 
 [[package]]
